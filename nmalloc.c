@@ -1,7 +1,7 @@
 /*
  * NMALLOC.C	- New Malloc (ported from kernel slab allocator)
  *
- * Copyright (c) 2003,2004,2009 The DragonFly Project.  All rights reserved.
+ * Copyright (c) 2003,2004,2009,2010 The DragonFly Project. All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
  * by Matthew Dillon <dillon@backplane.com>
@@ -39,7 +39,7 @@
  *
  * A slab allocator reserves a ZONE for each chunk size, then lays the
  * chunks out in an array within the zone.  Allocation and deallocation
- * is nearly instantanious, and overhead losses are limited to a fixed
+ * is nearly instantaneous, and overhead losses are limited to a fixed
  * worst-case amount.
  *
  * The slab allocator does not have to pre-initialize the list of
@@ -81,6 +81,7 @@
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/queue.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -89,6 +90,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include "spinlock.h"
 #include "un-namespace.h"
@@ -191,8 +193,6 @@ typedef struct slglobaldata {
 #define BIGXSIZE	(BIGHSIZE / 16)		/* bigalloc lock table */
 #define BIGXMASK	(BIGXSIZE - 1)
 
-#define SLGD_MAX	4			/* parallel allocations */
-
 #define SAFLAG_ZERO	0x0001
 #define SAFLAG_PASSIVE	0x0002
 
@@ -215,7 +215,7 @@ static const int ZoneLimit = ZALLOC_ZONE_LIMIT;
 static const int ZonePageCount = ZALLOC_ZONE_SIZE / PAGE_SIZE;
 static const int ZoneMask = ZALLOC_ZONE_SIZE - 1;
 
-static struct slglobaldata	SLGlobalData[SLGD_MAX];
+static struct slglobaldata	SLGlobalData;
 static bigalloc_t bigalloc_array[BIGHSIZE];
 static spinlock_t bigspin_array[BIGXSIZE];
 static int malloc_panic;
@@ -227,8 +227,6 @@ static const int32_t weirdary[16] = {
 	WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR,
 	WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR
 };
-
-static __thread slglobaldata_t LastSLGD = &SLGlobalData[0];
 
 static void *_slaballoc(size_t size, int flags);
 static void *_slabrealloc(void *ptr, size_t size);
@@ -250,22 +248,12 @@ static int  use_malloc_pattern;
 
 /*
  * Thread locks.
- *
- * NOTE: slgd_trylock() returns 0 or EBUSY
  */
 static __inline void
 slgd_lock(slglobaldata_t slgd)
 {
 	if (__isthreaded)
 		_SPINLOCK(&slgd->Spinlock);
-}
-
-static __inline int
-slgd_trylock(slglobaldata_t slgd)
-{
-	if (__isthreaded)
-		return(_SPINTRYLOCK(&slgd->Spinlock));
-	return(0);
 }
 
 static __inline void
@@ -626,31 +614,17 @@ _slaballoc(size_t size, int flags)
 		return(chunk);
 	}
 
-	/*
-	 * Multi-threading support.  This needs work XXX.
-	 *
-	 * Choose a globaldata structure to allocate from.  If we cannot
-	 * immediately get the lock try a different one.
-	 *
-	 * LastSLGD is a per-thread global.
-	 */
-	slgd = LastSLGD;
-	if (slgd_trylock(slgd) != 0) {
-		if (++slgd == &SLGlobalData[SLGD_MAX])
-			slgd = &SLGlobalData[0];
-		LastSLGD = slgd;
-		slgd_lock(slgd);
-	}
+	/* Compute allocation zone; zoneindex will panic on excessive sizes */
+	zi = zoneindex(&size, &chunking);
+	MASSERT(zi < NZONES);
+
+	slgd = &SLGlobalData;
+	slgd_lock(slgd);
 
 	/*
 	 * Attempt to allocate out of an existing zone.  If all zones are
 	 * exhausted pull one off the free list or allocate a new one.
-	 *
-	 * Note: zoneindex() will panic of size is too large.
 	 */
-	zi = zoneindex(&size, &chunking);
-	MASSERT(zi < NZONES);
-
 	if ((z = slgd->ZoneAry[zi]) == NULL) {
 		/*
 		 * Pull the zone off the free list.  If the zone on
