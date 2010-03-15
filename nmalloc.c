@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.13 2010/03/15 07:41:23 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.14 2010/03/15 07:54:51 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -258,8 +258,7 @@ typedef struct magazine_pair {
 typedef struct magazine_depot {
 	struct magazinelist full;
 	struct magazinelist empty;
-	
-	spinlock_t	lock;
+	pthread_spinlock_t lock;
 } magazine_depot;
 
 typedef struct thr_mags {
@@ -345,14 +344,14 @@ static __inline void
 depot_lock(magazine_depot *dp) 
 {
 	if (__isthreaded)
-		_SPINLOCK(&dp->lock);
+		pthread_spin_lock(&dp->lock);
 }
 
 static __inline void
 depot_unlock(magazine_depot *dp)
 {
 	if (__isthreaded)
-		_SPINUNLOCK(&dp->lock);
+		pthread_spin_unlock(&dp->lock);
 }
 
 static __inline void
