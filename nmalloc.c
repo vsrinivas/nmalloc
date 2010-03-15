@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.12 2010/03/15 06:57:07 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.13 2010/03/15 07:41:23 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -271,10 +271,10 @@ typedef struct thr_mags {
  * this variable when the code is compiled -fPIC */
 #define TLS_ATTRIBUTE __attribute__ ((tls_model ("initial-exec")));
 
+static int mtmagazine_free_live = 0;
 static __thread thr_mags thread_mags TLS_ATTRIBUTE;
 static pthread_key_t thread_mags_key;
 static pthread_once_t thread_mags_once = PTHREAD_ONCE_INIT;
-
 static magazine_depot depots[NZONES];
 
 /*
@@ -1005,7 +1005,11 @@ _slabfree(void *ptr, int mag_recurse)
 	if (ptr == ZERO_LENGTH_PTR)
 		return;
 
-	pthread_once(&thread_mags_once, &mtmagazine_init);
+	/* Ensure that a destructor is in-place for thread-exit */
+	if (mtmagazine_free_live == 0) {
+		mtmagazine_free_live = 1;
+		pthread_once(&thread_mags_once, &mtmagazine_init);
+	}
 
 	/*
 	 * Handle oversized allocations.
@@ -1308,7 +1312,7 @@ mtmagazine_free(int zi, void *ptr)
 	return rc;
 }
 
-static void __attribute__ ((constructor))
+static void 
 mtmagazine_init(void) {
 	int i;
 	i = pthread_key_create(&thread_mags_key, &mtmagazine_destructor);
@@ -1325,7 +1329,6 @@ mtmagazine_drain(struct magazine *mp)
 		obj = magazine_alloc(mp, NULL);
 		_slabfree(obj, 1);
 	}
-
 }
 
 /* 
