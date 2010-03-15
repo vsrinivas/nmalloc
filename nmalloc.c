@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.10 2010/03/15 05:13:18 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.11 2010/03/15 05:28:43 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -264,6 +264,7 @@ typedef struct magazine_depot {
 
 typedef struct thr_mags {
 	magazine_pair	mags[NZONES];
+	int		init;
 } thr_mags;
 
 /* With this attribute set, do not require a function call for accessing
@@ -271,6 +272,7 @@ typedef struct thr_mags {
 #define TLS_ATTRIBUTE __attribute__ ((tls_model ("initial-exec")));
 
 static __thread thr_mags thread_mags TLS_ATTRIBUTE;
+static pthread_key_t thread_mags_key;
 
 static magazine_depot depots[NZONES];
 
@@ -297,13 +299,14 @@ static const int32_t weirdary[16] = {
 
 static void *_slaballoc(size_t size, int flags);
 static void *_slabrealloc(void *ptr, size_t size);
-static void _slabfree(void *ptr);
+static void _slabfree(void *ptr, int);
 static void *_vmem_alloc(size_t bytes, size_t align, int flags);
 static void _vmem_free(void *ptr, size_t bytes);
 static void *magazine_alloc(struct magazine *, int *);
 static int magazine_free(struct magazine *, void *);
 static void *mtmagazine_alloc(int zi);
 static int mtmagazine_free(int zi, void *);
+static void mtmagazine_destructor(void *);
 static slzone_t zone_alloc(int flags);
 static void zone_free(void *z);
 static void _mpanic(const char *ctl, ...);
@@ -657,7 +660,7 @@ posix_memalign(void **memptr, size_t alignment, size_t size)
 void
 free(void *ptr)
 {
-	_slabfree(ptr);
+	_slabfree(ptr, 0);
 }
 
 /*
@@ -929,7 +932,7 @@ _slabrealloc(void *ptr, size_t size)
 				if (size > bigbytes)
 					size = bigbytes;
 				bcopy(ptr, nptr, size);
-				_slabfree(ptr);
+				_slabfree(ptr, 0);
 				return(nptr);
 			}
 			bigp = &big->next;
@@ -965,7 +968,7 @@ _slabrealloc(void *ptr, size_t size)
 		if (size > z->z_ChunkSize)
 			size = z->z_ChunkSize;
 		bcopy(ptr, nptr, size);
-		_slabfree(ptr);
+		_slabfree(ptr, 0);
 	}
 
 	return(nptr);
@@ -981,7 +984,7 @@ _slabrealloc(void *ptr, size_t size)
  * MPSAFE
  */
 static void
-_slabfree(void *ptr)
+_slabfree(void *ptr, int mag_recurse)
 {
 	slzone_t z;
 	slchunk_t chunk;
@@ -990,7 +993,6 @@ _slabfree(void *ptr)
 	slglobaldata_t slgd;
 	size_t size;
 	int zi;
-	int i;
 	int pgno;
 
 	/*
@@ -1010,7 +1012,7 @@ _slabfree(void *ptr)
 				*bigp = big->next;
 				bigalloc_unlock(ptr);
 				size = big->bytes;
-				_slabfree(big);
+				_slabfree(big, 0);
 #ifdef INVARIANTS
 				MASSERT(sizeof(weirdary) <= size);
 				bcopy(weirdary, ptr, sizeof(weirdary));
@@ -1032,8 +1034,7 @@ _slabfree(void *ptr)
 
 	size = z->z_ChunkSize;
 	zi = z->z_ZoneIndex;
-	i = mtmagazine_free(zi, ptr);
-	if (i == 0)
+	if ((mag_recurse == 0) && (mtmagazine_free(zi, ptr) == 0))
 		return;
 
 	pgno = ((char *)ptr - (char *)z) >> PAGE_SHIFT;
@@ -1243,6 +1244,11 @@ mtmagazine_free(int zi, void *ptr)
 
 	tp = &thread_mags;
 
+	if (tp->init == 0) {
+		pthread_setspecific(thread_mags_key, tp);
+		tp->init = 1;
+	}
+
 	do {
 		/* If the loaded magazine has space, free directly to it */
 		if (((mp = tp->mags[zi].loaded) != NULL) && 
@@ -1296,6 +1302,52 @@ mtmagazine_free(int zi, void *ptr)
 	} while (0);
 
 	return rc;
+}
+
+static void __attribute__ ((constructor))
+mtmagazine_init(void) {
+	int i;
+	i = pthread_key_create(&thread_mags_key, &mtmagazine_destructor);
+	if (i != 0)
+		abort();
+}
+
+static void
+mtmagazine_drain(struct magazine *mp)
+{
+	void *obj;
+
+	while (MAGAZINE_NOTEMPTY(mp)) {
+		obj = magazine_alloc(mp, NULL);
+		_slabfree(obj, 1);
+	}
+
+}
+
+/* 
+ * mtmagazine_destructor()
+ *
+ * When a thread exits, we reclaim all its resources; all its magazines are
+ * drained and the structures are freed. 
+ */
+static void
+mtmagazine_destructor(void *thrp)
+{
+	thr_mags *tp = thrp;
+	struct magazine *mp;
+	int i;
+
+	for (i = 0; i < NZONES; i++) {
+		mp = tp->mags[i].loaded;
+		if (mp != NULL && MAGAZINE_NOTEMPTY(mp))
+			mtmagazine_drain(mp);
+		_slabfree(mp, 1);
+
+		mp = tp->mags[i].prev;
+		if (mp != NULL && MAGAZINE_NOTEMPTY(mp))
+			mtmagazine_drain(mp);
+		_slabfree(mp, 1);
+	}
 }
 
 /*
