@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.6 2010/03/15 01:47:21 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.7 2010/03/15 02:15:46 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -277,7 +277,7 @@ static void *_vmem_alloc(size_t bytes, size_t align, int flags);
 static void _vmem_free(void *ptr, size_t bytes);
 static void *magazine_alloc(struct magazine *, int *);
 static int magazine_free(struct magazine *, void *);
-static void *zone_alloc(int flags);
+static slzone_t zone_alloc(int flags);
 static void zone_free(void *z);
 static void _mpanic(const char *ctl, ...);
 #if defined(INVARIANTS)
@@ -1123,13 +1123,13 @@ magazine_free(struct magazine *mp, void *p)
  * Attempt to allocate a zone from the zone magazine; the zone magazine has
  * M_BURST_EARLY enabled, so honor the burst request from the magazine.
  */
-static void *
+static slzone_t
 zone_alloc(int flags) 
 {
 	slglobaldata_t slgd = &SLGlobalData;
 	int burst = 1;
 	int i, j;
-	void *z;
+	slzone_t z;
 
 	zone_magazine_lock();
 
@@ -1145,6 +1145,8 @@ zone_alloc(int flags)
 		}
 
 		slgd_lock(slgd);
+	} else {
+		z->z_Flags |= SLZF_UNOTZEROD;
 	}
 
 	zone_magazine_unlock();
@@ -1167,9 +1169,8 @@ zone_free(void *z)
 	zone_magazine_lock();
 	slgd_unlock(slgd);
 	
-	/* XXX: Find a way to make this unnecessary */
 	bzero(z, sizeof(struct slzone));
-	
+
 	i = magazine_free(&zone_magazine, z);
 
 	/* If we failed to free, its because the zone magazine is full; we want to
