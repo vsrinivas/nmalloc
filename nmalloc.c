@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.9 2010/03/15 04:21:25 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.10 2010/03/15 05:13:18 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -361,7 +361,7 @@ static __inline void
 zone_magazine_unlock(void)
 {
 	if (__isthreaded)
-		_SPINLOCK(&zone_mag_lock);
+		_SPINUNLOCK(&zone_mag_lock);
 }
 
 static __inline void
