@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.7 2010/03/15 02:15:46 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.8 2010/03/15 03:45:41 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -142,7 +142,6 @@ typedef struct slzone {
 	__int32_t	z_Magic;	/* magic number for sanity check */
 	int		z_NFree;	/* total free chunks / ualloc space */
 	struct slzone *z_Next;		/* ZoneAry[] link if z_NFree non-zero */
-	struct slglobaldata *z_GlobalData;
 	int		z_NMax;		/* maximum free chunks */
 	char		*z_BasePtr;	/* pointer to start of chunk array */
 	int		z_UIndex;	/* current initial allocation index */
@@ -242,12 +241,43 @@ static struct magazine zone_magazine = {
 	.low_factor = M_LOW_ROUNDS
 };
 
-
 #define MAGAZINE_FULL(mp)	(mp->rounds == mp->capacity)
 #define MAGAZINE_NOTFULL(mp)	(mp->rounds < mp->capacity)
 #define MAGAZINE_EMPTY(mp)	(mp->rounds == 0)
 #define MAGAZINE_NOTEMPTY(mp)	(mp->rounds != 0)
 
+/* Each thread will have a pair of magazines per size-class (NZONES)
+ * The loaded magazine will support immediate allocations, the previous
+ * magazine will either be full or empty and can be swapped at need */
+typedef struct magazine_pair {
+	struct magazine	*loaded;
+	struct magazine	*prev;
+} magazine_pair;
+
+/* A depot is a collection of magazines for a single zone. */
+typedef struct magazine_depot {
+	struct magazinelist full;
+	struct magazinelist empty;
+	
+	spinlock_t	lock;
+} magazine_depot;
+
+typedef struct thr_mags {
+	magazine_pair	mags[NZONES];
+} thr_mags;
+
+/* With this attribute set, do not require a function call for accessing
+ * this variable when the code is compiled -fPIC */
+#define TLS_ATTRIBUTE __attribute__ ((tls_model ("initial-exec")));
+
+static __thread thr_mags thread_mags TLS_ATTRIBUTE;
+
+#define SWAP_MAGAZINES(mp_p)					\
+	do {							\
+		struct magazine *__tmp_m = mp_p->loaded;	\
+		mp_p->loaded = mp_p->prev;			\
+		mp_p->prev = __tmp_m;				\
+	} while (0)
 
 /*
  * Fixed globals (not per-cpu)
@@ -277,6 +307,8 @@ static void *_vmem_alloc(size_t bytes, size_t align, int flags);
 static void _vmem_free(void *ptr, size_t bytes);
 static void *magazine_alloc(struct magazine *, int *);
 static int magazine_free(struct magazine *, void *);
+static void *mtmagazine_alloc(int zi);
+static int mtmagazine_free(int zi, void *);
 static slzone_t zone_alloc(int flags);
 static void zone_free(void *z);
 static void _mpanic(const char *ctl, ...);
@@ -629,6 +661,7 @@ _slaballoc(size_t size, int flags)
 	int i;
 #endif
 	int off;
+	void *obj;
 
 	/*
 	 * Handle the degenerate size == 0 case.  Yes, this does happen.
@@ -678,6 +711,13 @@ _slaballoc(size_t size, int flags)
 	zi = zoneindex(&size, &chunking);
 	MASSERT(zi < NZONES);
 
+	obj = mtmagazine_alloc(zi);
+	if (obj != NULL) {
+		if (flags & SAFLAG_ZERO)
+			bzero(obj, size);
+		return (obj);
+	}
+
 	slgd = &SLGlobalData;
 	slgd_lock(slgd);
 
@@ -726,7 +766,6 @@ _slaballoc(size_t size, int flags)
 		else
 			off = (off + chunking - 1) & ~(chunking - 1);
 		z->z_Magic = ZALLOC_SLAB_MAGIC;
-		z->z_GlobalData = slgd;
 		z->z_ZoneIndex = zi;
 		z->z_NMax = (ZoneSize - off) / size;
 		z->z_NFree = z->z_NMax;
@@ -932,6 +971,9 @@ _slabfree(void *ptr)
 	bigalloc_t *bigp;
 	slglobaldata_t slgd;
 	size_t size;
+	int chunking;
+	int zi;
+	int i;
 	int pgno;
 
 	/*
@@ -971,9 +1013,15 @@ _slabfree(void *ptr)
 	z = (slzone_t)((uintptr_t)ptr & ~(uintptr_t)ZoneMask);
 	MASSERT(z->z_Magic == ZALLOC_SLAB_MAGIC);
 
+	size = z->z_ChunkSize;
+	zi = zoneindex(&size, &chunking);
+	i = mtmagazine_free(zi, ptr);
+	if (i == 0)
+		return;
+
 	pgno = ((char *)ptr - (char *)z) >> PAGE_SHIFT;
 	chunk = ptr;
-	slgd = z->z_GlobalData;
+	slgd = &SLGlobalData;
 	slgd_lock(slgd);
 
 #ifdef INVARIANTS
@@ -1114,6 +1162,18 @@ magazine_free(struct magazine *mp, void *p)
 		return 0;
 	}
 
+	return -1;
+}
+
+static void *
+mtmagazine_alloc(int zi)
+{
+	return NULL;
+}
+
+static int
+mtmagazine_free(int zi, void *ptr)
+{
 	return -1;
 }
 
