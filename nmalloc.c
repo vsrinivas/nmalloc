@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.11 2010/03/15 05:28:43 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.12 2010/03/15 06:57:07 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -273,6 +273,7 @@ typedef struct thr_mags {
 
 static __thread thr_mags thread_mags TLS_ATTRIBUTE;
 static pthread_key_t thread_mags_key;
+static pthread_once_t thread_mags_once = PTHREAD_ONCE_INIT;
 
 static magazine_depot depots[NZONES];
 
@@ -306,6 +307,7 @@ static void *magazine_alloc(struct magazine *, int *);
 static int magazine_free(struct magazine *, void *);
 static void *mtmagazine_alloc(int zi);
 static int mtmagazine_free(int zi, void *);
+static void mtmagazine_init(void);
 static void mtmagazine_destructor(void *);
 static slzone_t zone_alloc(int flags);
 static void zone_free(void *z);
@@ -1002,6 +1004,8 @@ _slabfree(void *ptr, int mag_recurse)
 		return;
 	if (ptr == ZERO_LENGTH_PTR)
 		return;
+
+	pthread_once(&thread_mags_once, &mtmagazine_init);
 
 	/*
 	 * Handle oversized allocations.
