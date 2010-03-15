@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.4 2010/03/14 23:15:23 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.5 2010/03/15 00:16:07 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -233,8 +233,9 @@ struct magazine {
 
 SLIST_HEAD(magazinelist, magazine);
 
+static spinlock_t zone_mag_lock;
 static struct magazine zone_magazine = {
-	.flags = M_BURST_EARLY | M_STAND,
+	.flags = M_BURST | M_BURST_EARLY | M_STAND,
 	.capacity = M_MAX_ROUNDS,
 	.rounds = 0,
 	.burst_factor = M_BURST_FACTOR,
@@ -275,7 +276,6 @@ static void _slabfree(void *ptr);
 static void *_vmem_alloc(size_t bytes, size_t align, int flags);
 static void _vmem_free(void *ptr, size_t bytes);
 static void *magazine_alloc(struct magazine *, int *);
-static int magazine_prefill(struct magazine *, void **, int);
 static int magazine_free(struct magazine *, void *);
 static void *zone_alloc(int flags);
 static void zone_free(void *z);
@@ -307,6 +307,20 @@ slgd_unlock(slglobaldata_t slgd)
 {
 	if (__isthreaded)
 		_SPINUNLOCK(&slgd->Spinlock);
+}
+
+static __inline void
+zone_magazine_lock(void)
+{
+	if (__isthreaded)
+		_SPINLOCK(&zone_mag_lock);
+}
+
+static __inline void
+zone_magazine_unlock(void)
+{
+	if (__isthreaded)
+		_SPINLOCK(&zone_mag_lock);
 }
 
 /*
@@ -1063,20 +1077,32 @@ chunk_mark_free(slzone_t z, void *chunk)
 static void *
 magazine_alloc(struct magazine *mp, int *burst)
 {
-	void *obj;
+	void *obj =  NULL;
 
-	if (mp != NULL && MAGAZINE_NOTEMPTY(mp)) {
-		obj = mp->objects[--mp->rounds];
-		return (obj);
-	}
+	do {
+		if (mp != NULL && MAGAZINE_NOTEMPTY(mp)) {
+			obj = mp->objects[--mp->rounds];
+			break;
+		} 
 
-	return NULL;
-}
+		/* Return burst factor to caller */
+		if ((mp->flags & M_BURST) && (burst != NULL)) {
+			*burst = mp->burst_factor;
+		}
 
-static int
-magazine_prefill(struct magazine *m, void **ptrs, int num)
-{
+		/* Reduce burst factor by NSCALE; if it hits 1, disable BURST */
+		if ((mp->flags & M_BURST) && (mp->flags & M_BURST_EARLY)) {
+			mp->burst_factor /= M_BURST_NSCALE;
+			if (mp->burst_factor <= 1) {
+				mp->burst_factor = 1;
+				mp->flags &= ~(M_BURST);
+				mp->flags &= ~(M_BURST_EARLY);
+			}
+		}
 
+	} while (0);
+
+	return obj;
 }
 
 static int
@@ -1093,21 +1119,34 @@ magazine_free(struct magazine *mp, void *p)
 /*
  * zone_alloc()
  *
+ * Attempt to allocate a zone from the zone magazine; the zone magazine has
+ * M_BURST_EARLY enabled, so honor the burst request from the magazine.
  */
 static void *
 zone_alloc(int flags) 
 {
 	slglobaldata_t slgd = &SLGlobalData;
-	int burst;
+	int burst = 1;
+	int i, j;
 	void *z;
+
+	zone_magazine_lock();
 
 	z = magazine_alloc(&zone_magazine, &burst);
 	if (z == NULL) {
 		slgd_unlock(slgd);
-		z = _vmem_alloc(ZoneSize, ZoneSize, flags);
-		slgd_lock(slgd);
+		z = _vmem_alloc(ZoneSize * burst, ZoneSize, flags);
 
+		for (i = 1; i < burst; i++) {
+			j = magazine_free(&zone_magazine,
+					  (char *) z + (ZoneSize * i));
+			MASSERT(j == 0);
+		}
+
+		slgd_lock(slgd);
 	}
+
+	zone_magazine_unlock();
 
 	return z;
 }
@@ -1124,9 +1163,12 @@ zone_free(void *z)
 	int i;
 
 	/* XXX: Find a way to make this unnecessary */
-	bzero(z, ZoneSize);
+	bzero(z, sizeof(struct slzone));
 
+	zone_magazine_lock();
 	i = magazine_free(&zone_magazine, z);
+	zone_magazine_unlock();
+
 	if (i == -1) {
 		slgd_unlock(slgd);
 		_vmem_free(z, ZoneSize);
