@@ -4,7 +4,7 @@
  * Copyright (c) 2003,2004,2009,2010 The DragonFly Project. All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
- * by Matthew Dillon <dillon@backplane.com>
+ * by Matthew Dillon <dillon@backplane.com> and by Venkatesh Srinivas.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.14 2010/03/15 07:54:51 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.15 2010/03/15 08:01:55 sv5679 Exp sv5679 $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -93,6 +93,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
+#include <bitstring.h>
 
 #include "spinlock.h"
 #include "un-namespace.h"
@@ -190,6 +191,7 @@ typedef struct slglobaldata {
 #define BIGHMASK	(BIGHSIZE - 1)
 #define BIGXSIZE	(BIGHSIZE / 16)		/* bigalloc lock table */
 #define BIGXMASK	(BIGXSIZE - 1)
+#define BLOOM_SIZE	64
 
 #define SAFLAG_ZERO	0x0001
 #define SAFLAG_PASSIVE	0x0002
@@ -212,7 +214,7 @@ typedef struct slglobaldata {
 #define M_MAX_ROUNDS	64
 #define M_LOW_ROUNDS	48
 #define M_INIT_ROUNDS	8
-#define M_BURST_FACTOR	8
+#define M_BURST_FACTOR  12	
 #define M_BURST_NSCALE	2
 
 #define M_BURST		0x0001
@@ -289,6 +291,7 @@ static bigalloc_t bigalloc_array[BIGHSIZE];
 static spinlock_t bigspin_array[BIGXSIZE];
 static int malloc_panic;
 static int malloc_dummy_pointer;
+bitstr_t bit_decl(bigalloc_bloom, BLOOM_SIZE);
 
 static const int32_t weirdary[16] = {
 	WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR,
@@ -322,6 +325,17 @@ static void chunk_mark_free(slzone_t z, void *chunk);
  */
 static int  use_malloc_pattern;
 #endif
+
+static int
+hashptr(void *ptr)
+{
+	uintptr_t p = (uintptr_t) ptr;
+	int k;
+	
+	k = p >> 16;
+
+	return k % BLOOM_SIZE;
+}
 
 /*
  * Thread locks.
@@ -684,6 +698,7 @@ _slaballoc(size_t size, int flags)
 #endif
 	int off;
 	void *obj;
+	int idx;
 
 	/*
 	 * Handle the degenerate size == 0 case.  Yes, this does happen.
@@ -725,6 +740,9 @@ _slaballoc(size_t size, int flags)
 		big->next = *bigp;
 		*bigp = big;
 		bigalloc_unlock(chunk);
+
+		idx = hashptr(chunk);
+		bit_set(bigalloc_bloom, idx);
 
 		return(chunk);
 	}
@@ -995,6 +1013,7 @@ _slabfree(void *ptr, int mag_recurse)
 	size_t size;
 	int zi;
 	int pgno;
+	int idx;
 
 	/*
 	 * Handle NULL frees and special 0-byte allocations
@@ -1013,6 +1032,10 @@ _slabfree(void *ptr, int mag_recurse)
 	/*
 	 * Handle oversized allocations.
 	 */
+	idx = hashptr(ptr);
+	if (bit_test(bigalloc_bloom, idx) == 0)
+		goto notbig;
+
 	if ((bigp = bigalloc_check_and_lock(ptr)) != NULL) {
 		while ((big = *bigp) != NULL) {
 			if (big->base == ptr) {
@@ -1032,6 +1055,7 @@ _slabfree(void *ptr, int mag_recurse)
 		bigalloc_unlock(ptr);
 	}
 
+notbig:
 	/*
 	 * Zone case.  Figure out the zone based on the fact that it is
 	 * ZoneSize aligned.
@@ -1166,7 +1190,7 @@ magazine_alloc(struct magazine *mp, int *burst)
 		/* Reduce burst factor by NSCALE; if it hits 1, disable BURST */
 		if ((mp->flags & M_BURST) && (mp->flags & M_BURST_EARLY) &&
 		    (burst != NULL)) {
-			mp->burst_factor /= M_BURST_NSCALE;
+			mp->burst_factor -= M_BURST_NSCALE;
 			if (mp->burst_factor <= 1) {
 				mp->burst_factor = 1;
 				mp->flags &= ~(M_BURST);
