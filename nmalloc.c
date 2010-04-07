@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.15 2010/03/15 08:01:55 sv5679 Exp sv5679 $
+ * $Id: nmalloc.c,v 1.16 2010/04/03 13:12:02 sv5679 Exp me $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -84,6 +84,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/queue.h>
+#include <sys/ktrace.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -285,6 +286,7 @@ static const int ZoneSize = ZALLOC_ZONE_SIZE;
 static const int ZoneLimit = ZALLOC_ZONE_LIMIT;
 static const int ZonePageCount = ZALLOC_ZONE_SIZE / PAGE_SIZE;
 static const int ZoneMask = ZALLOC_ZONE_SIZE - 1;
+static const int opt_utrace = 1;
 
 static struct slglobaldata	SLGlobalData;
 static bigalloc_t bigalloc_array[BIGHSIZE];
@@ -318,6 +320,22 @@ static void _mpanic(const char *ctl, ...);
 static void chunk_mark_allocated(slzone_t z, void *chunk);
 static void chunk_mark_free(slzone_t z, void *chunk);
 #endif
+
+struct nmalloc_utrace {
+	void *p;
+	size_t s;
+	void *r;
+};
+
+#define UTRACE(a, b, c)						\
+	if (opt_utrace) {					\
+		struct nmalloc_utrace ut = {			\
+			.p = (a),				\
+			.s = (b),				\
+			.r = (c)				\
+		};						\
+		utrace(&ut, sizeof(ut));			\
+	}
 
 #ifdef INVARIANTS
 /*
@@ -528,6 +546,8 @@ malloc(size_t size)
 	ptr = _slaballoc(size, 0);
 	if (ptr == NULL)
 		errno = ENOMEM;
+	else
+		UTRACE(0, size, ptr);
 	return(ptr);
 }
 
@@ -542,6 +562,8 @@ calloc(size_t number, size_t size)
 	ptr = _slaballoc(number * size, SAFLAG_ZERO);
 	if (ptr == NULL)
 		errno = ENOMEM;
+	else
+		UTRACE(0, number * size, ptr);
 	return(ptr);
 }
 
@@ -555,10 +577,13 @@ calloc(size_t number, size_t size)
 void *
 realloc(void *ptr, size_t size)
 {
-	ptr = _slabrealloc(ptr, size);
-	if (ptr == NULL)
+	void *ret;
+	ret = _slabrealloc(ptr, size);
+	if (ret == NULL)
 		errno = ENOMEM;
-	return(ptr);
+	else
+		UTRACE(ptr, size, ret);
+	return(ret);
 }
 
 /*
@@ -675,6 +700,7 @@ posix_memalign(void **memptr, size_t alignment, size_t size)
 void
 free(void *ptr)
 {
+	UTRACE(ptr, 0, 0);
 	_slabfree(ptr, 0);
 }
 
@@ -1033,8 +1059,8 @@ _slabfree(void *ptr, int mag_recurse)
 	 * Handle oversized allocations.
 	 */
 	idx = hashptr(ptr);
-	if (bit_test(bigalloc_bloom, idx) == 0)
-		goto notbig;
+	if (bit_test(bigalloc_bloom, idx) == 0);
+//		goto notbig;
 
 	if ((bigp = bigalloc_check_and_lock(ptr)) != NULL) {
 		while ((big = *bigp) != NULL) {
