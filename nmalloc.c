@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.18 2010/04/09 06:09:55 me Exp $
+ * $Id: nmalloc.c,v 1.19 2010/04/09 06:25:54 me Exp me $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -82,8 +82,7 @@
  * The value of the environment variable MALLOC_OPTIONS is a character string
  * containing various flags to tune nmalloc.
  *
- * 'U' / 'u'	Generate / do not generate utrace entries for ktrace(1).
- *
+ * 'U'   / ['u']	Generate / do not generate utrace entries for ktrace(1)
  */
 
 #include "libc_private.h"
@@ -220,7 +219,7 @@ typedef struct slglobaldata {
 
 #define M_MAX_ROUNDS	64
 #define M_ZONE_ROUNDS	64
-#define M_LOW_ROUNDS	48
+#define M_LOW_ROUNDS	32
 #define M_INIT_ROUNDS	8
 #define M_BURST_FACTOR  8
 #define M_BURST_NSCALE	2
@@ -364,12 +363,6 @@ malloc_init(void)
 		switch(*p) {
 		case 'u':	opt_utrace = 0; break;
 		case 'U':	opt_utrace = 1; break;
-		case '<':	zone_magazine.burst_factor /= 2; break;
-		case '>':	zone_magazine.burst_factor *= 2; break;
-		case 'b':	zone_magazine.flags &= ~(M_BURST_EARLY); break;
-		case 'B':	zone_magazine.flags |= (M_BURST_EARLY); break;
-		case 'n':	zone_magazine.flags &= ~(M_BURST); break;
-		case 'N':	zone_magazine.flags |= (M_BURST); break;
 		default:
 			break;
 		}
@@ -1320,7 +1313,8 @@ mtmagazine_free(int zi, void *ptr)
 	tp = &thread_mags;
 
 	if (tp->init == 0) {
-		pthread_setspecific(thread_mags_key, tp);
+		if (__isthreaded)
+			pthread_setspecific(thread_mags_key, tp);
 		tp->init = 1;
 	}
 
@@ -1381,8 +1375,9 @@ mtmagazine_free(int zi, void *ptr)
 
 static void 
 mtmagazine_init(void) {
-	int i;
-	i = pthread_key_create(&thread_mags_key, &mtmagazine_destructor);
+	int i = 0;
+	if (__isthreaded)
+		i = pthread_key_create(&thread_mags_key,&mtmagazine_destructor);
 	if (i != 0)
 		abort();
 }
