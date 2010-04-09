@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.16 2010/04/03 13:12:02 sv5679 Exp me $
+ * $Id: nmalloc.c,v 1.17 2010/04/07 14:56:46 me Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -76,6 +76,14 @@
  *    + ability to allocate arbitrarily large chunks of memory
  *    + realloc will reuse the passed pointer if possible, within the
  *	limitations of the zone chunking.
+ *
+ * TUNING
+ *
+ * The value of the environment variable MALLOC_OPTIONS is a character string
+ * containing various flags to tune nmalloc.
+ *
+ * 'U' / 'u'	Generate / do not generate utrace entries for ktrace(1).
+ *
  */
 
 #include "libc_private.h"
@@ -94,7 +102,6 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
-#include <bitstring.h>
 
 #include "spinlock.h"
 #include "un-namespace.h"
@@ -192,7 +199,6 @@ typedef struct slglobaldata {
 #define BIGHMASK	(BIGHSIZE - 1)
 #define BIGXSIZE	(BIGHSIZE / 16)		/* bigalloc lock table */
 #define BIGXMASK	(BIGXSIZE - 1)
-#define BLOOM_SIZE	64
 
 #define SAFLAG_ZERO	0x0001
 #define SAFLAG_PASSIVE	0x0002
@@ -286,14 +292,14 @@ static const int ZoneSize = ZALLOC_ZONE_SIZE;
 static const int ZoneLimit = ZALLOC_ZONE_LIMIT;
 static const int ZonePageCount = ZALLOC_ZONE_SIZE / PAGE_SIZE;
 static const int ZoneMask = ZALLOC_ZONE_SIZE - 1;
-static const int opt_utrace = 1;
 
+static int opt_utrace = 0;
+static int malloc_started = 0;
 static struct slglobaldata	SLGlobalData;
 static bigalloc_t bigalloc_array[BIGHSIZE];
 static spinlock_t bigspin_array[BIGXSIZE];
 static int malloc_panic;
 static int malloc_dummy_pointer;
-bitstr_t bit_decl(bigalloc_bloom, BLOOM_SIZE);
 
 static const int32_t weirdary[16] = {
 	WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR, WEIRD_ADDR,
@@ -316,6 +322,7 @@ static void mtmagazine_destructor(void *);
 static slzone_t zone_alloc(int flags);
 static void zone_free(void *z);
 static void _mpanic(const char *ctl, ...);
+static void malloc_init(void);
 #if defined(INVARIANTS)
 static void chunk_mark_allocated(slzone_t z, void *chunk);
 static void chunk_mark_free(slzone_t z, void *chunk);
@@ -344,15 +351,24 @@ struct nmalloc_utrace {
 static int  use_malloc_pattern;
 #endif
 
-static int
-hashptr(void *ptr)
+static void
+malloc_init(void)
 {
-	uintptr_t p = (uintptr_t) ptr;
-	int k;
-	
-	k = p >> 16;
+	const char *p = NULL;
 
-	return k % BLOOM_SIZE;
+	if (issetugid() == 0) 
+		p = getenv("MALLOC_OPTIONS");
+
+	for (; p != NULL && *p != '\0'; p++) {
+		switch(*p) {
+		case 'u':	opt_utrace = 0; break;
+		case 'U':	opt_utrace = 1; break;
+		default:
+			break;
+		}
+	}
+
+	UTRACE(0, 0, 0);
 }
 
 /*
@@ -724,7 +740,11 @@ _slaballoc(size_t size, int flags)
 #endif
 	int off;
 	void *obj;
-	int idx;
+
+	if (!malloc_started) {
+		malloc_started = 1;
+		malloc_init();
+	}
 
 	/*
 	 * Handle the degenerate size == 0 case.  Yes, this does happen.
@@ -766,9 +786,6 @@ _slaballoc(size_t size, int flags)
 		big->next = *bigp;
 		*bigp = big;
 		bigalloc_unlock(chunk);
-
-		idx = hashptr(chunk);
-		bit_set(bigalloc_bloom, idx);
 
 		return(chunk);
 	}
@@ -1039,7 +1056,6 @@ _slabfree(void *ptr, int mag_recurse)
 	size_t size;
 	int zi;
 	int pgno;
-	int idx;
 
 	/*
 	 * Handle NULL frees and special 0-byte allocations
@@ -1058,10 +1074,6 @@ _slabfree(void *ptr, int mag_recurse)
 	/*
 	 * Handle oversized allocations.
 	 */
-	idx = hashptr(ptr);
-	if (bit_test(bigalloc_bloom, idx) == 0);
-//		goto notbig;
-
 	if ((bigp = bigalloc_check_and_lock(ptr)) != NULL) {
 		while ((big = *bigp) != NULL) {
 			if (big->base == ptr) {
@@ -1081,7 +1093,6 @@ _slabfree(void *ptr, int mag_recurse)
 		bigalloc_unlock(ptr);
 	}
 
-notbig:
 	/*
 	 * Zone case.  Figure out the zone based on the fact that it is
 	 * ZoneSize aligned.
