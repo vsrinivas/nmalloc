@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.21 2010/04/09 10:49:08 me Exp $
+ * $Id: nmalloc.c,v 1.22 2010/04/09 11:12:38 me Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -83,6 +83,7 @@
  * containing various flags to tune nmalloc.
  *
  * 'U'   / ['u']	Generate / do not generate utrace entries for ktrace(1)
+ * 'Z'   / ['z']	Zero out / do not zero all allocations
  */
 
 #include "libc_private.h"
@@ -298,6 +299,7 @@ static const int ZoneMask = ZALLOC_ZONE_SIZE - 1;
 
 static int opt_utrace = 0;
 static int malloc_started = 0;
+static int g_malloc_flags = 0;
 static spinlock_t malloc_init_lock;
 static struct slglobaldata	SLGlobalData;
 static bigalloc_t bigalloc_array[BIGHSIZE];
@@ -375,6 +377,8 @@ malloc_init(void)
 		switch(*p) {
 		case 'u':	opt_utrace = 0; break;
 		case 'U':	opt_utrace = 1; break;
+		case 'z':	g_malloc_flags = 0; break;
+		case 'Z': 	g_malloc_flags = SAFLAG_ZERO; break;
 		default:
 			break;
 		}
@@ -758,9 +762,8 @@ _slaballoc(size_t size, int flags)
 	int off;
 	void *obj;
 
-	if (!malloc_started) {
+	if (!malloc_started) 
 		malloc_init();
-	}
 
 	/*
 	 * Handle the degenerate size == 0 case.  Yes, this does happen.
@@ -771,6 +774,9 @@ _slaballoc(size_t size, int flags)
 	 */
 	if (size == 0)
 		return(ZERO_LENGTH_PTR);
+
+	/* Capture global flags */
+	flags |= g_malloc_flags;
 
 	/*
 	 * Handle large allocations directly.  There should not be very many
