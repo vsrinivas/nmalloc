@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.19 2010/04/09 06:25:54 me Exp me $
+ * $Id: nmalloc.c,v 1.20 2010/04/09 06:46:22 me Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -171,6 +171,9 @@ typedef struct slglobaldata {
 } *slglobaldata_t;
 
 #define SLZF_UNOTZEROD		0x0001
+
+#define MAG_NORECURSE 		0x01
+#define FASTSLABREALLOC		0x02
 
 /*
  * Misc constants.  Note that allocations that are exact multiples of
@@ -310,7 +313,7 @@ static const int32_t weirdary[16] = {
 
 static void *_slaballoc(size_t size, int flags);
 static void *_slabrealloc(void *ptr, size_t size);
-static void _slabfree(void *ptr, int);
+static void _slabfree(void *ptr, int, void*);
 static void *_vmem_alloc(size_t bytes, size_t align, int flags);
 static void _vmem_free(void *ptr, size_t bytes);
 static void *magazine_alloc(struct magazine *, int *);
@@ -717,7 +720,7 @@ void
 free(void *ptr)
 {
 	UTRACE(ptr, 0, 0);
-	_slabfree(ptr, 0);
+	_slabfree(ptr, 0, NULL);
 }
 
 /*
@@ -975,8 +978,7 @@ _slabrealloc(void *ptr, size_t size)
 	}
 
 	/*
-	 * Handle oversized allocations.  XXX we really should require
-	 * that a size be passed to free() instead of this nonsense.
+	 * Handle oversized allocations. 
 	 */
 	if ((bigp = bigalloc_check_and_lock(ptr)) != NULL) {
 		bigalloc_t big;
@@ -994,7 +996,7 @@ _slabrealloc(void *ptr, size_t size)
 				if (size > bigbytes)
 					size = bigbytes;
 				bcopy(ptr, nptr, size);
-				_slabfree(ptr, 0);
+				_slabfree(ptr, FASTSLABREALLOC, bigp);
 				return(nptr);
 			}
 			bigp = &big->next;
@@ -1030,7 +1032,7 @@ _slabrealloc(void *ptr, size_t size)
 		if (size > z->z_ChunkSize)
 			size = z->z_ChunkSize;
 		bcopy(ptr, nptr, size);
-		_slabfree(ptr, 0);
+		_slabfree(ptr, 0, NULL);
 	}
 
 	return(nptr);
@@ -1043,10 +1045,14 @@ _slabrealloc(void *ptr, size_t size)
  * attempt to uplodate ks_loosememuse as MP races could prevent us from
  * checking memory limits in malloc.
  *
+ * flags:
+ *	MAG_NORECURSE		Skip magazine layer
+ *	FASTSLABREALLOC		Fast call from realloc
+ * 
  * MPSAFE
  */
 static void
-_slabfree(void *ptr, int mag_recurse)
+_slabfree(void *ptr, int flags, void *rbigp)
 {
 	slzone_t z;
 	slchunk_t chunk;
@@ -1056,6 +1062,13 @@ _slabfree(void *ptr, int mag_recurse)
 	size_t size;
 	int zi;
 	int pgno;
+
+	/* Fast realloc path for big allocations */
+	if (flags & FASTSLABREALLOC) {
+		bigp = rbigp;
+		big = *bigp;
+		goto fastslabrealloc;
+	}
 
 	/*
 	 * Handle NULL frees and special 0-byte allocations
@@ -1077,10 +1090,11 @@ _slabfree(void *ptr, int mag_recurse)
 	if ((bigp = bigalloc_check_and_lock(ptr)) != NULL) {
 		while ((big = *bigp) != NULL) {
 			if (big->base == ptr) {
+fastslabrealloc:
 				*bigp = big->next;
 				bigalloc_unlock(ptr);
 				size = big->bytes;
-				_slabfree(big, 0);
+				_slabfree(big, 0, NULL);
 #ifdef INVARIANTS
 				MASSERT(sizeof(weirdary) <= size);
 				bcopy(weirdary, ptr, sizeof(weirdary));
@@ -1102,7 +1116,7 @@ _slabfree(void *ptr, int mag_recurse)
 
 	size = z->z_ChunkSize;
 	zi = z->z_ZoneIndex;
-	if ((mag_recurse == 0) && (mtmagazine_free(zi, ptr) == 0))
+	if (((flags & MAG_NORECURSE) == 0) && (mtmagazine_free(zi, ptr) == 0))
 		return;
 
 	pgno = ((char *)ptr - (char *)z) >> PAGE_SHIFT;
@@ -1389,7 +1403,7 @@ mtmagazine_drain(struct magazine *mp)
 
 	while (MAGAZINE_NOTEMPTY(mp)) {
 		obj = magazine_alloc(mp, NULL);
-		_slabfree(obj, 1);
+		_slabfree(obj, MAG_NORECURSE, NULL);
 	}
 }
 
@@ -1410,12 +1424,12 @@ mtmagazine_destructor(void *thrp)
 		mp = tp->mags[i].loaded;
 		if (mp != NULL && MAGAZINE_NOTEMPTY(mp))
 			mtmagazine_drain(mp);
-		_slabfree(mp, 1);
+		_slabfree(mp, MAG_NORECURSE, NULL);
 
 		mp = tp->mags[i].prev;
 		if (mp != NULL && MAGAZINE_NOTEMPTY(mp))
 			mtmagazine_drain(mp);
-		_slabfree(mp, 1);
+		_slabfree(mp, MAG_NORECURSE, NULL);
 	}
 }
 
