@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.22 2010/04/09 11:12:38 me Exp $
+ * $Id: nmalloc.c,v 1.23 2010/04/09 11:28:43 me Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -92,6 +92,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/queue.h>
+#include <sys/uio.h>
 #include <sys/ktrace.h>
 #include <stdio.h>
 #include <stdlib.h>
