@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.20 2010/04/09 06:46:22 me Exp $
+ * $Id: nmalloc.c,v 1.21 2010/04/09 10:49:08 me Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -298,6 +298,7 @@ static const int ZoneMask = ZALLOC_ZONE_SIZE - 1;
 
 static int opt_utrace = 0;
 static int malloc_started = 0;
+static spinlock_t malloc_init_lock;
 static struct slglobaldata	SLGlobalData;
 static bigalloc_t bigalloc_array[BIGHSIZE];
 static spinlock_t bigspin_array[BIGXSIZE];
@@ -359,6 +360,14 @@ malloc_init(void)
 {
 	const char *p = NULL;
 
+	if (__isthreaded) {
+		_SPINLOCK(&malloc_init_lock);
+		if (malloc_started) {
+			_SPINUNLOCK(&malloc_init_lock);
+			return;
+		}
+	}
+
 	if (issetugid() == 0) 
 		p = getenv("MALLOC_OPTIONS");
 
@@ -370,6 +379,11 @@ malloc_init(void)
 			break;
 		}
 	}
+
+	malloc_started = 1;
+
+	if (__isthreaded)
+		_SPINUNLOCK(&malloc_init_lock);
 
 	UTRACE(0, 0, 0);
 }
@@ -745,7 +759,6 @@ _slaballoc(size_t size, int flags)
 	void *obj;
 
 	if (!malloc_started) {
-		malloc_started = 1;
 		malloc_init();
 	}
 
