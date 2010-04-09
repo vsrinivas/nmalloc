@@ -33,7 +33,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.17 2010/04/07 14:56:46 me Exp $
+ * $Id: nmalloc.c,v 1.18 2010/04/09 06:09:55 me Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -219,9 +219,10 @@ typedef struct slglobaldata {
  */
 
 #define M_MAX_ROUNDS	64
+#define M_ZONE_ROUNDS	64
 #define M_LOW_ROUNDS	48
 #define M_INIT_ROUNDS	8
-#define M_BURST_FACTOR  12	
+#define M_BURST_FACTOR  8
 #define M_BURST_NSCALE	2
 
 #define M_BURST		0x0001
@@ -244,7 +245,7 @@ SLIST_HEAD(magazinelist, magazine);
 static spinlock_t zone_mag_lock;
 static struct magazine zone_magazine = {
 	.flags = M_BURST | M_BURST_EARLY | M_STAND,
-	.capacity = M_MAX_ROUNDS,
+	.capacity = M_ZONE_ROUNDS,
 	.rounds = 0,
 	.burst_factor = M_BURST_FACTOR,
 	.low_factor = M_LOW_ROUNDS
@@ -363,6 +364,12 @@ malloc_init(void)
 		switch(*p) {
 		case 'u':	opt_utrace = 0; break;
 		case 'U':	opt_utrace = 1; break;
+		case '<':	zone_magazine.burst_factor /= 2; break;
+		case '>':	zone_magazine.burst_factor *= 2; break;
+		case 'b':	zone_magazine.flags &= ~(M_BURST_EARLY); break;
+		case 'B':	zone_magazine.flags |= (M_BURST_EARLY); break;
+		case 'n':	zone_magazine.flags &= ~(M_BURST); break;
+		case 'N':	zone_magazine.flags |= (M_BURST); break;
 		default:
 			break;
 		}
