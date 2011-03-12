@@ -34,8 +34,9 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $DragonFly: nmalloc.c,v 1.37 2010/07/23 08:20:35 vsrinivas Exp $
  * $Id$
+ * DragonFly BSD: 03/12/2011 12:15p
+ * $old-id: nmalloc.c,v 1.37 2010/07/23 08:20:35 vsrinivas Exp $
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -105,7 +106,15 @@
 
 /* cc -shared -fPIC -g -O -I/usr/src/lib/libc/include -o nmalloc.so nmalloc.c */
 
+const char *rcsid = "$Id";
+
 #include "libc_private.h"
+
+/*
+ * A convenient constructor macro, GCC 3.4.0 added priority support to
+ * constructors, provide a compatible interface for both.
+ */
+#define        __constructor(prio) __attribute__((constructor))
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -318,9 +327,7 @@ static const int ZoneMask = ZALLOC_ZONE_SIZE - 1;
 
 static int opt_madvise = 0;
 static int opt_utrace = 0;
-static int malloc_started = 0;
 static int g_malloc_flags = 0;
-static spinlock_t malloc_init_lock;
 static struct slglobaldata	SLGlobalData;
 static bigalloc_t bigalloc_array[BIGHSIZE];
 static spinlock_t bigspin_array[BIGXSIZE];
@@ -347,8 +354,8 @@ static void mtmagazine_init(void);
 static void mtmagazine_destructor(void *);
 static slzone_t zone_alloc(int flags);
 static void zone_free(void *z);
-static void _mpanic(const char *ctl, ...);
-static void malloc_init(void);
+static void _mpanic(const char *ctl, ...) __printflike(1, 2);
+static void malloc_init(void) __constructor(0);
 #if defined(INVARIANTS)
 static void chunk_mark_allocated(slzone_t z, void *chunk);
 static void chunk_mark_free(slzone_t z, void *chunk);
@@ -382,14 +389,6 @@ malloc_init(void)
 {
 	const char *p = NULL;
 
-	if (__isthreaded) {
-		_SPINLOCK(&malloc_init_lock);
-		if (malloc_started) {
-			_SPINUNLOCK(&malloc_init_lock);
-			return;
-		}
-	}
-
 	if (issetugid() == 0) 
 		p = getenv("MALLOC_OPTIONS");
 
@@ -405,11 +404,6 @@ malloc_init(void)
 			break;
 		}
 	}
-
-	malloc_started = 1;
-
-	if (__isthreaded)
-		_SPINUNLOCK(&malloc_init_lock);
 
 	UTRACE((void *) -1, 0, NULL);
 }
@@ -434,11 +428,11 @@ _nmalloc_thr_init(void)
 	tp = &thread_mags;
 	tp->init = -1;
 
-	pthread_setspecific(thread_mags_key, tp);
 	if (mtmagazine_free_live == 0) {
 		mtmagazine_free_live = 1;
 		pthread_once(&thread_mags_once, mtmagazine_init);
 	}
+	pthread_setspecific(thread_mags_key, tp);
 	tp->init = 1;
 }
 
@@ -810,9 +804,6 @@ _slaballoc(size_t size, int flags)
 #endif
 	int off;
 	void *obj;
-
-	if (!malloc_started) 
-		malloc_init();
 
 	/*
 	 * Handle the degenerate size == 0 case.  Yes, this does happen.
