@@ -34,9 +34,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: nmalloc.c,v 1.40 2011/03/12 17:23:23 sv5679 Exp sv5679 $
- * DragonFly BSD: 03/12/2011 12:15p
- * $old-id: nmalloc.c,v 1.37 2010/07/23 08:20:35 vsrinivas Exp $
+ * $Id$
  */
 /*
  * This module implements a slab allocator drop-in replacement for the
@@ -106,15 +104,7 @@
 
 /* cc -shared -fPIC -g -O -I/usr/src/lib/libc/include -o nmalloc.so nmalloc.c */
 
-const char *rcsid = "$Id$";
-
 #include "libc_private.h"
-
-/*
- * A convenient constructor macro, GCC 3.4.0 added priority support to
- * constructors, provide a compatible interface for both.
- */
-#define        __constructor(prio) __attribute__((constructor))
 
 #include <sys/param.h>
 #include <sys/types.h>
